@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Shared, one-time setup for every lab: the CodeConnections link between this AWS
+  account and the GitHub repository that holds all lab templates. Each lab then
+  adds its own Git sync configuration on top (labs/<week>/git-sync.yaml).
+
+  Deploy in two passes, because AWS requires a person to approve the GitHub
+  connection in the console before a repository can be linked:
+    1. Deploy with CreateRepositoryLink=false, then approve the pending connection
+       (Developer Tools > Settings > Connections > Update pending connection).
+    2. Update the stack with CreateRepositoryLink=true.
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: GitHub user or organisation that owns the repository.
+  RepositoryName:
+    Type: String
+    Description: Name of the repository that holds the lab templates.
+  CreateRepositoryLink:
+    Type: String
+    AllowedValues: ["false", "true"]
+    Default: "false"
+    Description: Set to "true" only after the connection has been approved in the console.
+
+Conditions:
+  LinkRepository: !Equals [!Ref CreateRepositoryLink, "true"]
+
+Resources:
+  GitHubConnection:
+    Type: AWS::CodeConnections::Connection
+    Properties:
+      ConnectionName: onward-github
+      ProviderType: GitHub
+
+  LabsRepositoryLink:
+    Type: AWS::CodeStarConnections::RepositoryLink
+    Condition: LinkRepository
+    Properties:
+      ConnectionArn: !Ref GitHubConnection
+      OwnerId: !Ref GitHubOwner
+      RepositoryName: !Ref RepositoryName
+
+Outputs:
+  ConnectionArn:
+    Value: !Ref GitHubConnection
+    Export:
+      Name: onward-github-connection-arn
+  ConnectionStatus:
+    Description: Must be AVAILABLE before pass 2.
+    Value: !GetAtt GitHubConnection.ConnectionStatus
+  RepositoryLinkId:
+    Condition: LinkRepository
+    Value: !GetAtt LabsRepositoryLink.RepositoryLinkId
+    Export:
+      Name: onward-github-repository-link-id

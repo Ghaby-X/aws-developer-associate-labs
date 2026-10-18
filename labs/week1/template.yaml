@@ -1,0 +1,346 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Onward Logistics - Week 1: repeatable, auditable onboarding for three engineers.
+  Role groups use AWS managed policies; a permissions boundary caps the on-call
+  engineer so they can never create or terminate compute; first passwords come from Secrets Manager; CloudTrail
+  records every access change; a budget makes spend visible from day one.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+    Description: Environment segment of the onward-<environment>-<purpose> naming standard.
+
+  BudgetLimitUsd:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    Description: Monthly cost budget for the account, in USD.
+
+  BudgetAlertEmail:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /onward/dev/budget-alert-email
+    Description: >-
+      SSM parameter holding the budget alert address, so the address stays out of
+      this public repository. Created by labs/week1/git-sync.yaml.
+
+  AttachExtraOncallPermissions:
+    Type: String
+    AllowedValues: ["false", "true"]
+    Default: "false"
+    Description: >-
+      Evidence test only. "true" attaches AmazonEC2FullAccess to the on-call group,
+      simulating someone loosening its permissions later. The permissions boundary
+      must still stop ec2-user-2 from launching or terminating instances.
+
+Conditions:
+  AttachExtraOncall: !Equals [!Ref AttachExtraOncallPermissions, "true"]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # First-login credentials: one generated password per engineer.
+  # No Name property, so a rebuild never collides with a secret still inside
+  # its deletion recovery window.
+  # ---------------------------------------------------------------------------
+  S3UserInitialPassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub "onward-${Environment} first sign-in password for s3-user (reset forced at first login)"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "s3-user"}'
+        GenerateStringKey: password
+        PasswordLength: 20
+        ExcludeCharacters: "\"'`\\/@ "
+
+  Ec2User1InitialPassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub "onward-${Environment} first sign-in password for ec2-user-1 (reset forced at first login)"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "ec2-user-1"}'
+        GenerateStringKey: password
+        PasswordLength: 20
+        ExcludeCharacters: "\"'`\\/@ "
+
+  Ec2User2InitialPassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub "onward-${Environment} first sign-in password for ec2-user-2 (reset forced at first login)"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "ec2-user-2"}'
+        GenerateStringKey: password
+        PasswordLength: 20
+        ExcludeCharacters: "\"'`\\/@ "
+
+  # ---------------------------------------------------------------------------
+  # Permissions boundary: the most the on-call engineer can ever do.
+  # Effective access = group policies AND boundary, so permissions attached
+  # to ec2-user-2 or their group later cannot get past this limit.
+  # ---------------------------------------------------------------------------
+  OncallObserverBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "onward-${Environment}-oncall-observer-boundary"
+      Description: Caps on-call engineers at viewing compute. They can never create or terminate it.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowObserveCompute
+            Effect: Allow
+            Action:
+              - ec2:Describe*
+              - elasticloadbalancing:Describe*
+              - autoscaling:Describe*
+              - cloudwatch:Describe*
+              - cloudwatch:Get*
+              - cloudwatch:List*
+            Resource: "*"
+          - Sid: NeverCreateOrTerminateCompute
+            Effect: Deny
+            Action:
+              - ec2:RunInstances
+              - ec2:StartInstances
+              - ec2:TerminateInstances
+              - ec2:CreateFleet
+              - ec2:RequestSpotInstances
+              - ec2:RequestSpotFleet
+              - ec2:RunScheduledInstances
+              - autoscaling:CreateAutoScalingGroup
+              - autoscaling:UpdateAutoScalingGroup
+              - autoscaling:SetDesiredCapacity
+            Resource: "*"
+          - Sid: AllowOwnPasswordChange
+            Effect: Allow
+            Action: iam:ChangePassword
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/${!aws:username}"
+          - Sid: AllowReadPasswordPolicy
+            Effect: Allow
+            Action: iam:GetAccountPasswordPolicy
+            Resource: "*"
+
+  # ---------------------------------------------------------------------------
+  # Role groups: day-one access comes from AWS managed policies, so there are
+  # no hand-written, entity-specific permission policies to maintain.
+  # ---------------------------------------------------------------------------
+  AllEngineersGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub "onward-${Environment}-all-engineers"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/IAMUserChangePassword"
+
+  StorageEngineersGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub "onward-${Environment}-storage-engineers"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonS3FullAccess"
+
+  ComputeEngineersGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub "onward-${Environment}-compute-engineers"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEC2FullAccess"
+
+  OncallObserversGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub "onward-${Environment}-oncall-observers"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ReadOnlyAccess"
+        - !If
+          - AttachExtraOncall
+          - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEC2FullAccess"
+          - !Ref AWS::NoValue
+
+  # ---------------------------------------------------------------------------
+  # Engineers: user names are fixed by the client brief.
+  # ---------------------------------------------------------------------------
+  S3User:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: s3-user
+      Groups: [!Ref AllEngineersGroup, !Ref StorageEngineersGroup]
+      LoginProfile:
+        Password: !Sub "{{resolve:secretsmanager:${S3UserInitialPassword}:SecretString:password}}"
+        PasswordResetRequired: true
+
+  Ec2User1:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: ec2-user-1
+      Groups: [!Ref AllEngineersGroup, !Ref ComputeEngineersGroup]
+      LoginProfile:
+        Password: !Sub "{{resolve:secretsmanager:${Ec2User1InitialPassword}:SecretString:password}}"
+        PasswordResetRequired: true
+
+  Ec2User2:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: ec2-user-2
+      Groups: [!Ref AllEngineersGroup, !Ref OncallObserversGroup]
+      PermissionsBoundary: !Ref OncallObserverBoundary
+      LoginProfile:
+        Password: !Sub "{{resolve:secretsmanager:${Ec2User2InitialPassword}:SecretString:password}}"
+        PasswordResetRequired: true
+
+  # ---------------------------------------------------------------------------
+  # Audit trail: who changed what, and when.
+  # The bucket is retained when the stack is deleted, because audit logs must
+  # outlive the infrastructure they describe. It has no fixed name, so the stack
+  # can be rebuilt from the repository while old logs are kept.
+  # ---------------------------------------------------------------------------
+  AuditLogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldAuditLogs
+            Status: Enabled
+            ExpirationInDays: 365
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+
+  AuditLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AuditLogBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt AuditLogBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/onward-${Environment}-audit-trail"
+          - Sid: CloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${AuditLogBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/onward-${Environment}-audit-trail"
+          # No IAM user, engineer or administrator, can delete, overwrite or
+          # loosen the audit logs. Only CloudTrail writes them; bucket changes
+          # go through the stack's deployment role.
+          - Sid: ProtectAuditLogsFromIamUsers
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:PutObjectRetention
+              - s3:PutObjectLegalHold
+              - s3:BypassGovernanceRetention
+              - s3:DeleteBucket
+              - s3:PutBucketPolicy
+              - s3:DeleteBucketPolicy
+              - s3:PutBucketVersioning
+              - s3:PutLifecycleConfiguration
+              - s3:PutBucketPublicAccessBlock
+              - s3:PutBucketOwnershipControls
+              - s3:PutEncryptionConfiguration
+            Resource:
+              - !GetAtt AuditLogBucket.Arn
+              - !Sub "${AuditLogBucket.Arn}/*"
+            Condition:
+              ArnLike:
+                aws:PrincipalArn: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/*"
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt AuditLogBucket.Arn
+              - !Sub "${AuditLogBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  AuditTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: AuditLogBucketPolicy
+    Properties:
+      TrailName: !Sub "onward-${Environment}-audit-trail"
+      S3BucketName: !Ref AuditLogBucket
+      IsLogging: true
+      IsMultiRegionTrail: true
+      IncludeGlobalServiceEvents: true # IAM is a global service
+      EnableLogFileValidation: true # proves log files were not altered
+
+  # ---------------------------------------------------------------------------
+  # Spend visible from day one.
+  # ---------------------------------------------------------------------------
+  MonthlyCostBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub "onward-${Environment}-monthly-cost"
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref BudgetLimitUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetAlertEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetAlertEmail
+
+Outputs:
+  ConsoleSignInUrl:
+    Description: Where the new engineers sign in.
+    Value: !Sub "https://${AWS::AccountId}.signin.aws.amazon.com/console"
+  S3UserPasswordSecret:
+    Description: Secret holding s3-user's first password (admins only).
+    Value: !Ref S3UserInitialPassword
+  Ec2User1PasswordSecret:
+    Description: Secret holding ec2-user-1's first password (admins only).
+    Value: !Ref Ec2User1InitialPassword
+  Ec2User2PasswordSecret:
+    Description: Secret holding ec2-user-2's first password (admins only).
+    Value: !Ref Ec2User2InitialPassword
+  AuditTrailArn:
+    Value: !GetAtt AuditTrail.Arn
+  AuditLogBucketName:
+    Value: !Ref AuditLogBucket
+  OncallExtraPermissionsAttached:
+    Description: Whether the evidence test (AmazonEC2FullAccess on the on-call group) is active.
+    Value: !Ref AttachExtraOncallPermissions

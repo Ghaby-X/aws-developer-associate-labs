@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Week 1 Git sync wiring: the service role Git sync uses, and the sync
+  configuration that keeps the onward-dev-iam-onboarding stack in step with
+  labs/week1/deployment.yaml on the main branch. Requires the shared
+  bootstrap/github-connection.yaml stack (pass 2) to exist.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  Branch:
+    Type: String
+    Default: main
+  BudgetAlertEmail:
+    Type: String
+    AllowedPattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    Description: >-
+      Budget alert address. Passed on the command line and stored in SSM, so it
+      never appears in the public repository.
+
+Resources:
+  BudgetAlertEmailParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/onward/${Environment}/budget-alert-email"
+      Type: String
+      Value: !Ref BudgetAlertEmail
+      Description: Recipient of onward budget alerts (read by the onboarding stack).
+
+
+  GitSyncPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "onward-${Environment}-week1-git-sync"
+      Description: >-
+        What Git sync needs to deploy the Week 1 onboarding stack: CloudFormation
+        change sets, plus only the services and resource names that stack creates.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SyncToCloudFormation
+            Effect: Allow
+            Action:
+              - cloudformation:CreateChangeSet
+              - cloudformation:DeleteChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStacks
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:GetTemplate
+              - cloudformation:ListChangeSets
+              - cloudformation:ListStacks
+              - cloudformation:ValidateTemplate
+            Resource: "*"
+          - Sid: ManagedEventRules
+            Effect: Allow
+            Action:
+              - events:PutRule
+              - events:PutTargets
+            Resource: "*"
+            Condition:
+              StringEquals:
+                events:ManagedBy: cloudformation.sync.codeconnections.amazonaws.com
+          - Sid: DescribeEventRules
+            Effect: Allow
+            Action: events:DescribeRule
+            Resource: "*"
+          - Sid: ManageOnboardingIdentities
+            Effect: Allow
+            Action: iam:*
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/s3-user"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/ec2-user-*"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:group/onward-${Environment}-*"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/onward-${Environment}-*"
+          - Sid: AttachAwsManagedPolicies
+            Effect: Allow
+            Action:
+              - iam:GetPolicy
+              - iam:GetPolicyVersion
+            Resource: !Sub "arn:${AWS::Partition}:iam::aws:policy/*"
+          - Sid: InitialPasswords
+            Effect: Allow
+            Action:
+              - secretsmanager:CreateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:DescribeSecret
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:UpdateSecret
+              - secretsmanager:TagResource
+              - secretsmanager:UntagResource
+              - secretsmanager:GetRandomPassword
+            Resource: "*"
+          - Sid: AuditLogBucket
+            Effect: Allow
+            Action: s3:*
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::onward-${Environment}-iam-onboarding-*"
+          - Sid: AuditTrailWrite
+            Effect: Allow
+            Action: cloudtrail:*
+            Resource: !Sub "arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/onward-${Environment}-*"
+          - Sid: AuditTrailRead
+            Effect: Allow
+            Action:
+              - cloudtrail:DescribeTrails
+              - cloudtrail:GetTrailStatus
+              - cloudtrail:ListTrails
+            Resource: "*"
+          - Sid: CloudTrailServiceLinkedChecks
+            Effect: Allow
+            Action: iam:GetRole
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/*"
+          - Sid: ReadBudgetEmailParameter
+            Effect: Allow
+            Action: ssm:GetParameters
+            Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/onward/${Environment}/budget-alert-email"
+          - Sid: CostBudget
+            Effect: Allow
+            Action:
+              - budgets:ViewBudget
+              - budgets:ModifyBudget
+            Resource: !Sub "arn:${AWS::Partition}:budgets::${AWS::AccountId}:budget/onward-${Environment}-*"
+
+  GitSyncRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-week1-git-sync"
+      Description: Assumed by CloudFormation Git sync to deploy the Week 1 onboarding stack.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CfnGitSyncTrustPolicy
+            Effect: Allow
+            Principal:
+              Service: cloudformation.sync.codeconnections.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !ImportValue onward-github-connection-arn
+      ManagedPolicyArns:
+        - !Ref GitSyncPolicy
+
+  OnboardingStackSync:
+    Type: AWS::CodeStarConnections::SyncConfiguration
+    Properties:
+      ResourceName: !Sub "onward-${Environment}-iam-onboarding"
+      SyncType: CFN_STACK_SYNC
+      RepositoryLinkId: !ImportValue onward-github-repository-link-id
+      Branch: !Ref Branch
+      ConfigFile: labs/week1/deployment.yaml
+      RoleArn: !GetAtt GitSyncRole.Arn
+      PublishDeploymentStatus: ENABLED
+      # Only commits touching this lab's template or deployment file redeploy it,
+      # so other labs in the same repository never trigger this stack.
+      TriggerResourceUpdateOn: FILE_CHANGE
+
+Outputs:
+  GitSyncRoleArn:
+    Value: !GetAtt GitSyncRole.Arn
+  SyncedStackName:
+    Value: !Sub "onward-${Environment}-iam-onboarding"

@@ -1,0 +1,16 @@
+template-file-path: labs/week1/template.yaml
+
+parameters:
+  Environment: dev
+  BudgetLimitUsd: 10
+  BudgetAlertEmail: /onward/dev/budget-alert-email
+  # Evidence test: flip to "true" in a commit to attach AmazonEC2FullAccess to the
+  # on-call group, prove ec2-user-2 still cannot launch or terminate instances,
+  # then flip back. Both commits become part of the audit trail.
+  AttachExtraOncallPermissions: "false"
+
+# Stack tags propagate to every resource in the stack that supports tagging.
+tags:
+  Project: onward
+  Owner: Gabriel Anyaele
+  Environment: dev
