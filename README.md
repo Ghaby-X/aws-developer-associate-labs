@@ -13,7 +13,8 @@ Hands-on labs from my AWS Certified Developer – Associate preparation programm
 ```
 .
 ├── bootstrap/                 # one-time, shared setup used by every lab
-│   └── github-connection.yaml # CodeConnections link from AWS to this repository
+│   ├── github-connection.yaml # CodeConnections link from AWS to this repository
+│   └── placeholder-stack.yaml # empty stack that reserves a lab's stack name for Git sync
 └── labs/
     └── weekN/
         ├── README.md          # scenario, design decisions, deploy steps, evidence

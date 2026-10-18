@@ -86,7 +86,16 @@ aws cloudformation deploy \
   --tags Project=onward Owner="Gabriel Anyaele" Environment=dev
 ```
 
-**2. Week 1 Git sync wiring.**
+**2. Reserve the stack name.** Git sync can only manage a stack that already exists ([AWS docs](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/git-sync-status.html#git-sync-status-stack-state)). Create an empty placeholder, and Git sync replaces it with the real template on its first sync:
+
+```bash
+aws cloudformation deploy \
+  --stack-name onward-dev-iam-onboarding \
+  --template-file bootstrap/placeholder-stack.yaml \
+  --tags Project=onward Owner="Gabriel Anyaele" Environment=dev
+```
+
+**3. Week 1 Git sync wiring.**
 
 ```bash
 aws cloudformation deploy \
@@ -99,7 +108,7 @@ aws cloudformation deploy \
 
 Git sync then creates the `onward-dev-iam-onboarding` stack from `labs/week1/deployment.yaml`. From this point, every access change is a commit to `main`.
 
-**3. Hand over first passwords.** An administrator reads each secret (its ARN is in the stack outputs) and passes the password to the engineer over a private channel:
+**4. Hand over first passwords.** An administrator reads each secret (its ARN is in the stack outputs) and passes the password to the engineer over a private channel:
 
 ```bash
 aws secretsmanager get-secret-value --secret-id <secret-arn> --query SecretString --output text
