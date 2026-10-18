@@ -123,6 +123,9 @@ Resources:
             Action:
               - budgets:ViewBudget
               - budgets:ModifyBudget
+              - budgets:TagResource
+              - budgets:UntagResource
+              - budgets:ListTagsForResource
             Resource: !Sub "arn:${AWS::Partition}:budgets::${AWS::AccountId}:budget/onward-${Environment}-*"
 
   GitSyncRole:
