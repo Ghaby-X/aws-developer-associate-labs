@@ -145,7 +145,7 @@ Resources:
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
               ArnLike:
-                aws:SourceArn: !ImportValue onward-github-connection-arn
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:codeconnections:${AWS::Region}:${AWS::AccountId}:connection/*"
       ManagedPolicyArns:
         - !Ref GitSyncPolicy
 

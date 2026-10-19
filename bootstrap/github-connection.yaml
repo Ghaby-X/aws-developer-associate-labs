@@ -8,6 +8,10 @@ Description: >-
   connection in the console before a repository can be linked:
     1. Deploy with CreateRepositoryLink=false, then approve the pending connection
        (Developer Tools > Settings > Connections > Update pending connection).
+       In the approval dialog, select the "AWS Connector for GitHub" app
+       installation (install it on the repository first if none is listed).
+       Without the app, GitHub never sends push events and commits do not
+       trigger Git sync.
     2. Update the stack with CreateRepositoryLink=true.
 
 Parameters:
@@ -27,28 +31,28 @@ Conditions:
   LinkRepository: !Equals [!Ref CreateRepositoryLink, "true"]
 
 Resources:
-  GitHubConnection:
+  GitHubAppConnection:
     Type: AWS::CodeConnections::Connection
     Properties:
-      ConnectionName: onward-github
+      ConnectionName: onward-github-app
       ProviderType: GitHub
 
   LabsRepositoryLink:
     Type: AWS::CodeStarConnections::RepositoryLink
     Condition: LinkRepository
     Properties:
-      ConnectionArn: !Ref GitHubConnection
+      ConnectionArn: !Ref GitHubAppConnection
       OwnerId: !Ref GitHubOwner
       RepositoryName: !Ref RepositoryName
 
 Outputs:
   ConnectionArn:
-    Value: !Ref GitHubConnection
+    Value: !Ref GitHubAppConnection
     Export:
       Name: onward-github-connection-arn
   ConnectionStatus:
     Description: Must be AVAILABLE before pass 2.
-    Value: !GetAtt GitHubConnection.ConnectionStatus
+    Value: !GetAtt GitHubAppConnection.ConnectionStatus
   RepositoryLinkId:
     Condition: LinkRepository
     Value: !GetAtt LabsRepositoryLink.RepositoryLinkId
