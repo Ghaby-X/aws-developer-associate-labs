@@ -75,6 +75,12 @@ Resources:
               - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/ec2-user-*"
               - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:group/onward-${Environment}-*"
               - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/onward-${Environment}-*"
+          # The CloudFormation IAM group handler calls UpdateGroup against the
+          # bare "group/" ARN (no name), so a name-scoped resource never matches.
+          - Sid: CfnGroupHandlerUpdate
+            Effect: Allow
+            Action: iam:UpdateGroup
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:group/*"
           - Sid: AttachAwsManagedPolicies
             Effect: Allow
             Action:
