@@ -118,6 +118,82 @@ Resources:
             Effect: Allow
             Action: iam:GetAccountPasswordPolicy
             Resource: "*"
+          # Without these the boundary would stop the on-call engineer from
+          # enrolling the MFA device that RequireMfaPolicy demands.
+          - Sid: AllowListMfaDevices
+            Effect: Allow
+            Action:
+              - iam:ListVirtualMFADevices
+              - iam:ListUsers
+            Resource: "*"
+          - Sid: AllowCreateOwnVirtualMfaDevice
+            Effect: Allow
+            Action: iam:CreateVirtualMFADevice
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:mfa/*"
+          - Sid: AllowManageOwnMfa
+            Effect: Allow
+            Action:
+              - iam:EnableMFADevice
+              - iam:DeactivateMFADevice
+              - iam:ResyncMFADevice
+              - iam:GetMFADevice
+              - iam:ListMFADevices
+              - iam:GetUser
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/${!aws:username}"
+
+  # ---------------------------------------------------------------------------
+  # MFA for every engineer: nothing works until the engineer has signed in with
+  # MFA, except changing their first password and enrolling their own device.
+  # A stolen password alone is useless. (AWS's documented self-managed MFA
+  # pattern: docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_examples_iam_mfa-selfmanage.html)
+  # ---------------------------------------------------------------------------
+  RequireMfaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "onward-${Environment}-require-mfa"
+      Description: Lets engineers enrol their own MFA device and denies everything else until they sign in with MFA.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowViewAccountInfo
+            Effect: Allow
+            Action:
+              - iam:GetAccountPasswordPolicy
+              - iam:ListVirtualMFADevices
+              - iam:ListUsers
+            Resource: "*"
+          - Sid: AllowCreateOwnVirtualMfaDevice
+            Effect: Allow
+            Action: iam:CreateVirtualMFADevice
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:mfa/*"
+          - Sid: AllowManageOwnMfa
+            Effect: Allow
+            Action:
+              - iam:EnableMFADevice
+              - iam:DeactivateMFADevice
+              - iam:ResyncMFADevice
+              - iam:GetMFADevice
+              - iam:ListMFADevices
+              - iam:GetUser
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/${!aws:username}"
+          - Sid: DenyAllExceptMfaSetupWithoutMfa
+            Effect: Deny
+            NotAction:
+              - iam:CreateVirtualMFADevice
+              - iam:EnableMFADevice
+              - iam:GetMFADevice
+              - iam:ListMFADevices
+              - iam:ListVirtualMFADevices
+              - iam:ListUsers
+              - iam:ResyncMFADevice
+              - iam:GetUser
+              - iam:ChangePassword
+              - iam:GetAccountPasswordPolicy
+              - sts:GetSessionToken
+            Resource: "*"
+            Condition:
+              BoolIfExists:
+                aws:MultiFactorAuthPresent: "false"
 
   # ---------------------------------------------------------------------------
   # Role groups: day-one access comes from AWS managed policies, so there are
@@ -129,6 +205,7 @@ Resources:
       GroupName: !Sub "onward-${Environment}-all-engineers"
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/IAMUserChangePassword"
+        - !Ref RequireMfaPolicy
 
   StorageEngineersGroup:
     Type: AWS::IAM::Group

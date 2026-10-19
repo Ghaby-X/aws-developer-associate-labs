@@ -9,13 +9,14 @@ declare -A ACTIONS=(
 )
 echo "## IAM policy simulator: $1"
 echo
-echo "Generated $(date -u +%FT%TZ) with \`aws iam simulate-principal-policy\` against account $ACCT. The simulator evaluates each user's group policies and permissions boundary together."
+echo "Generated $(date -u +%FT%TZ) with \`aws iam simulate-principal-policy\` against account $ACCT. The simulator evaluates each user's group policies and permissions boundary together. Unless marked otherwise, rows assume the user signed in **with MFA**."
 echo
 echo "| User | Action | Decision | Boundary decision |"
 echo "| --- | --- | --- | --- |"
 for u in s3-user ec2-user-1 ec2-user-2; do
   args=(--policy-source-arn "arn:aws:iam::$ACCT:user/$u" --action-names ${ACTIONS[$u]})
-  aws iam simulate-principal-policy "${args[@]}" --resource-arns '*' --output json \
+  aws iam simulate-principal-policy "${args[@]}" --resource-arns '*' \
+    --context-entries "ContextKeyName=aws:MultiFactorAuthPresent,ContextKeyValues=true,ContextKeyType=boolean" --output json \
   | python3 -I -c "
 import json,sys
 u=sys.argv[1]
@@ -40,4 +41,17 @@ for r in json.load(sys.stdin)['EvaluationResults']:
     d=r['EvalDecision']; d=d if d=='allowed' else f'**{d}**'
     print(f\"| {u} | \`iam:ChangePassword\` (own user) | {d} | {b} |\")
 " "$u"
+done
+# Same day-one actions signed in with a password only (no MFA): the require-mfa policy denies them.
+echo
+echo "### Without MFA"
+echo
+echo "| User | Action | Decision |"
+echo "| --- | --- | --- |"
+for pair in "s3-user s3:ListAllMyBuckets" "ec2-user-1 ec2:RunInstances" "ec2-user-2 ec2:DescribeInstances"; do
+  set -- $pair
+  d=$(aws iam simulate-principal-policy --policy-source-arn "arn:aws:iam::$ACCT:user/$1" --action-names "$2" --resource-arns '*' \
+      --context-entries "ContextKeyName=aws:MultiFactorAuthPresent,ContextKeyValues=false,ContextKeyType=boolean" \
+      --query 'EvaluationResults[0].EvalDecision' --output text)
+  echo "| $1 | \`$2\` | **$d** |"
 done
