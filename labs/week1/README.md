@@ -9,39 +9,7 @@ Onward onboards 5 to 10 engineers a month, and each one's AWS access is currentl
 
 ## How access is controlled
 
-```mermaid
-flowchart LR
-    subgraph Git["GitHub: main branch"]
-        T[template.yaml + deployment.yaml]
-    end
-    T -- Git sync --> CFN[CloudFormation stack<br/>onward-dev-iam-onboarding]
-
-    CFN --> SM[Secrets Manager<br/>3 generated first passwords]
-    CFN --> TR[CloudTrail trail + S3 log bucket]
-    CFN --> BU[Budget alert]
-
-    subgraph IAM
-        AE[onward-dev-all-engineers<br/>IAMUserChangePassword]
-        SG[onward-dev-storage-engineers<br/>AmazonS3FullAccess]
-        CG[onward-dev-compute-engineers<br/>AmazonEC2FullAccess]
-        OG[onward-dev-oncall-observers<br/>AmazonEC2ReadOnlyAccess]
-
-        U1[s3-user]
-        U2[ec2-user-1]
-        U3[ec2-user-2]
-
-        B3{{observer boundary<br/>Describe only + explicit Deny<br/>RunInstances / TerminateInstances}}
-    end
-
-    CFN --> IAM
-    SM -. first password .-> U1 & U2 & U3
-    AE --- U1 & U2 & U3
-    SG --- U1
-    CG --- U2
-    OG --- U3
-    B3 -. caps .-> U3
-    TR --- BP[/bucket policy: no IAM user can<br/>delete or alter the logs/]
-```
+![Week 1 architecture: Git sync pipeline, IAM groups and users, permissions boundary, Secrets Manager, CloudTrail audit bucket and budget](architecture.png)
 
 **Groups give each role its day-one access** through AWS managed policies. **The on-call engineer also has a permissions boundary**, so their effective permissions are their group policies AND the boundary. However many policies are attached to `ec2-user-2` or their group later, the boundary is the ceiling.
 
@@ -53,6 +21,7 @@ flowchart LR
 | A **permissions boundary on `ec2-user-2`** | The client's one hard guarantee is that the on-call engineer can never create or terminate compute, "not even if someone later loosens their group's permissions". A boundary is the AWS mechanism that caps a user regardless of what is attached later. Boundaries attach to users or roles, not groups. |
 | The on-call boundary allows `Describe*` only, plus an **explicit Deny** on launch and terminate actions | An explicit Deny always wins and documents the intent. `ec2:Get*` is left out on purpose, because it includes `GetPasswordData`, which retrieves Windows administrator passwords. |
 | The audit **bucket policy denies every IAM user** from deleting, overwriting or loosening the logs | `AmazonS3FullAccess` would otherwise let the storage engineer delete the evidence of who changed access. A resource policy protects the logs from every user, administrators included, not just one engineer. CloudTrail still writes, and stack changes still flow through the deployment role. |
+| **MFA required for every engineer** (`onward-dev-require-mfa` on the all-engineers group) | A stolen password alone is useless: until an engineer signs in with MFA, everything is denied except changing their first password and enrolling their own device. CloudFormation can't enrol a phone for someone, so the template *requires* MFA and each engineer enrols at first sign-in. The on-call boundary allows the self-service MFA actions, so the boundary doesn't lock `ec2-user-2` out. |
 | **No inline policies** anywhere | A mandatory requirement. Every permission is a reusable managed policy that auditors can see in one place. |
 | **Secrets Manager** generates first passwords, read with a `{{resolve:secretsmanager:…}}` dynamic reference, with `PasswordResetRequired: true` | No plain-text credential exists in Git, chat or the template, and each engineer must replace it with their own password at first sign-in. |
 | Secrets and the log bucket have **no fixed names** | Deleted secrets are held for a recovery window and the log bucket is retained, so fixed names would block a rebuild from the repository. |
@@ -114,15 +83,18 @@ Git sync then creates the `onward-dev-iam-onboarding` stack from `labs/week1/dep
 aws secretsmanager get-secret-value --secret-id <secret-arn> --query SecretString --output text
 ```
 
-## Evidence plan
+## Evidence
 
-| Client check | How it is proven | Evidence |
+Everything below is in [`evidence/`](evidence/). The simulator results can be regenerated at any time with `evidence/simulate.sh`.
+
+| Client check | Result | Evidence |
 | --- | --- | --- |
-| Each engineer can do their job on day one | Sign in as each user and do the role's task: list and upload to S3, describe instances, launch a test instance | `evidence/` |
-| …and cannot do more | Each user tries an action outside their role and gets `AccessDenied` | `evidence/` |
-| On-call engineer still can't create or terminate compute after permissions are added | Commit `AttachExtraOncallPermissions: "true"`, then `ec2-user-2` tries `RunInstances` and `TerminateInstances` (and the IAM policy simulator is run on that user). Then revert. | `evidence/` |
-| Head of Security can see how access was defined and who changed it | Git history of `labs/week1/`, Git sync deployment history, and CloudTrail events for the IAM changes | `evidence/` |
-| The whole setup can be rebuilt from the repository | Delete the onboarding stack, re-run the sync, and it comes back identical | `evidence/` |
+| Each engineer can do their job on day one | **Met.** `s3-user` created a bucket, `ec2-user-1` launched an instance, and `ec2-user-2` could see the running instance. | [simulator baseline](evidence/01-simulator-baseline.md), `s3-user-2-*`, `ec2-user-1-2-*`, `ec2-user-2-2-*` |
+| …and cannot do more | **Met.** Each user was denied outside their role: S3 for the compute users, EC2 and IAM for `s3-user`, IAM for `ec2-user-1`. Nobody could delete the audit logs. | [simulator baseline](evidence/01-simulator-baseline.md), `ec2-user-1-3/4-*`, `ec2-user-2-5-*`, `s3-user-3-*` |
+| Secure first login, no shared plain-text credential | **Met.** Passwords are generated by Secrets Manager and readable only by administrators. A reset is forced at first sign-in. | `ec2-user-1-1-forced-password-reset.png` |
+| On-call engineer can't create or terminate compute, even after permissions are added | **Met.** With `AmazonEC2FullAccess` attached to the on-call group (commit `dec18d4`), `ec2-user-2` was still explicitly denied `RunInstances`, `TerminateInstances` and `StartInstances` by the boundary. It was reverted in `241a6d7`. | [simulator with extra permissions](evidence/02-simulator-extra-permissions.md), `extra-1/2/3-*`, `ec2-user-2-3-*` |
+| Head of Security can see how access was defined and who changed it | **Met.** Every access change maps to a Git commit (author, time, reason) and to a CloudTrail event performed by the Git sync role. A change made outside Git paused syncing until it was signed off. | [audit trail](evidence/03-audit-trail.md) |
+| The whole setup can be rebuilt from the repository | See [rebuild test](evidence/04-rebuild-from-repository.md). | `04-rebuild-from-repository.md` |
 
 ## Cleanup
 
