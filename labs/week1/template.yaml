@@ -263,10 +263,10 @@ Resources:
         Password: !Sub "{{resolve:secretsmanager:${Ec2User2InitialPassword}:SecretString:password}}"
         PasswordResetRequired: true
 
-  Ec2User3:
+  Ec2User4:
     Type: AWS::IAM::User
     Properties:
-      UserName: ec2-user-3
+      UserName: ec2-user-4
       Groups: [!Ref AllEngineersGroup, !Ref OncallObserversGroup]
       PermissionsBoundary: !Ref OncallObserverBoundary
       LoginProfile:
