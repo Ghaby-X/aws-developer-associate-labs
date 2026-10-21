@@ -263,16 +263,6 @@ Resources:
         Password: !Sub "{{resolve:secretsmanager:${Ec2User2InitialPassword}:SecretString:password}}"
         PasswordResetRequired: true
 
-  Ec2User4:
-    Type: AWS::IAM::User
-    Properties:
-      UserName: ec2-user-4
-      Groups: [!Ref AllEngineersGroup, !Ref OncallObserversGroup]
-      PermissionsBoundary: !Ref OncallObserverBoundary
-      LoginProfile:
-        Password: !Sub "{{resolve:secretsmanager:${Ec2User2InitialPassword}:SecretString:password}}"
-        PasswordResetRequired: true
-
   # ---------------------------------------------------------------------------
   # Audit trail: who changed what, and when.
   # The bucket is retained when the stack is deleted, because audit logs must
