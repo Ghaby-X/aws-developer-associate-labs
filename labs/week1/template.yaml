@@ -254,14 +254,14 @@ Resources:
         Password: !Sub "{{resolve:secretsmanager:${S3UserInitialPassword}:SecretString:password}}"
         PasswordResetRequired: true
 
-  Ec2User1:
-    Type: AWS::IAM::User
-    Properties:
-      UserName: ec2-user-1
-      Groups: [!Ref AllEngineersGroup, !Ref ComputeEngineersGroup]
-      LoginProfile:
-        Password: !Sub "{{resolve:secretsmanager:${Ec2User1InitialPassword}:SecretString:password}}"
-        PasswordResetRequired: true
+  #Ec2User1:
+  #  Type: AWS::IAM::User
+   # Properties:
+    #  UserName: ec2-user-1
+     # Groups: [!Ref AllEngineersGroup, !Ref ComputeEngineersGroup]
+      #LoginProfile:
+       # Password: !Sub "{{resolve:secretsmanager:${Ec2User1InitialPassword}:SecretString:password}}"
+        #PasswordResetRequired: true
 
   Ec2User2:
     Type: AWS::IAM::User
