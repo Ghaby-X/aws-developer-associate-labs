@@ -34,8 +34,18 @@ Parameters:
       simulating someone loosening its permissions later. The permissions boundary
       must still stop ec2-user-2 from launching or terminating instances.
 
+  RequireMfa:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: >-
+      "true" attaches onward-<environment>-require-mfa to the all-engineers group, so
+      engineers can do nothing until they sign in with MFA. "false" keeps the policy
+      defined but unattached, for testing permissions without MFA.
+
 Conditions:
   AttachExtraOncall: !Equals [!Ref AttachExtraOncallPermissions, "true"]
+  EnforceMfa: !Equals [!Ref RequireMfa, "true"]
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -205,7 +215,7 @@ Resources:
       GroupName: !Sub "onward-${Environment}-all-engineers"
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/IAMUserChangePassword"
-        - !Ref RequireMfaPolicy
+        - !If [EnforceMfa, !Ref RequireMfaPolicy, !Ref AWS::NoValue]
 
   StorageEngineersGroup:
     Type: AWS::IAM::Group

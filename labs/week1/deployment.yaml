@@ -8,6 +8,9 @@ parameters:
   # on-call group, prove ec2-user-2 still cannot launch or terminate instances,
   # then flip back. Both commits become part of the audit trail.
   AttachExtraOncallPermissions: "false"
+  # MFA is temporarily off so permissions can be tested without enrolling a device.
+  # Set back to "true" to require MFA again.
+  RequireMfa: "false"
 
 # Stack tags propagate to every resource in the stack that supports tagging.
 tags:
