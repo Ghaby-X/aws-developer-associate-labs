@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Shared Git sync wiring for the lab being worked on: the service role Git sync
+  uses, and the sync configuration that keeps that lab's stack in step with
+  labs/<lab>/deployment.yaml on the main branch. Switch labs by redeploying with
+  a different Lab parameter. The previous lab's stack is left in place (no
+  longer synced) until it is deleted. Requires the shared
+  bootstrap/github-connection.yaml stack (pass 2).
+
+Parameters:
+  Lab:
+    Type: String
+    AllowedPattern: "^week[0-9]+$"
+    Description: The lab folder under labs/ whose stack Git sync deploys, for example week2.
+  StackPurpose:
+    Type: String
+    AllowedPattern: "^[a-z0-9-]+$"
+    Description: >-
+      The purpose part of the lab's stack name, onward-<environment>-<purpose>.
+      For example iam-onboarding (week1) or orders-network (week2).
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  Branch:
+    Type: String
+    Default: main
+  BudgetAlertEmail:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional budget alert address for labs that create a budget. Passed on the
+      command line and stored in SSM, so it never appears in the public repository.
+
+Conditions:
+  HasBudgetEmail: !Not [!Equals [!Ref BudgetAlertEmail, ""]]
+
+Resources:
+  BudgetAlertEmailParameter:
+    Type: AWS::SSM::Parameter
+    Condition: HasBudgetEmail
+    Properties:
+      Name: !Sub "/onward/${Environment}/budget-alert-email"
+      Type: String
+      Value: !Ref BudgetAlertEmail
+      Description: Recipient of onward budget alerts.
+
+  # PowerUserAccess (attached to the role below) covers every service except
+  # IAM and Organizations. This adds IAM, limited to the company naming pattern,
+  # so lab stacks can create their own roles but never touch anything else.
+  GitSyncIamPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "onward-${Environment}-git-sync-iam"
+      Description: IAM for lab stacks, limited to resources named onward-<environment>-*.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: LabIamResources
+            Effect: Allow
+            Action: iam:*
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/onward-${Environment}-*"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/onward-${Environment}-*"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/onward-${Environment}-*"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/onward-${Environment}-*"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:group/onward-${Environment}-*"
+          - Sid: ReadIam
+            Effect: Allow
+            Action:
+              - iam:Get*
+              - iam:List*
+            Resource: "*"
+
+  GitSyncRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-git-sync"
+      Description: Assumed by CloudFormation Git sync to deploy the current lab's stack.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CfnGitSyncTrustPolicy
+            Effect: Allow
+            Principal:
+              Service: cloudformation.sync.codeconnections.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:codeconnections:${AWS::Region}:${AWS::AccountId}:connection/*"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/PowerUserAccess"
+        - !Ref GitSyncIamPolicy
+
+  LabStackSync:
+    Type: AWS::CodeStarConnections::SyncConfiguration
+    Properties:
+      ResourceName: !Sub "onward-${Environment}-${StackPurpose}"
+      SyncType: CFN_STACK_SYNC
+      RepositoryLinkId: !ImportValue onward-github-repository-link-id
+      Branch: !Ref Branch
+      ConfigFile: !Sub "labs/${Lab}/deployment.yaml"
+      RoleArn: !GetAtt GitSyncRole.Arn
+      PublishDeploymentStatus: ENABLED
+      # Only commits touching this lab's template or deployment file redeploy it,
+      # so other labs in the same repository never trigger this stack.
+      TriggerResourceUpdateOn: FILE_CHANGE
+
+Outputs:
+  GitSyncRoleArn:
+    Value: !GetAtt GitSyncRole.Arn
+  SyncedStackName:
+    Value: !Sub "onward-${Environment}-${StackPurpose}"

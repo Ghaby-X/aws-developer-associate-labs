@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   Shared, one-time setup for every lab: the CodeConnections link between this AWS
   account and the GitHub repository that holds all lab templates. Each lab then
-  adds its own Git sync configuration on top (labs/<week>/git-sync.yaml).
+  adds its Git sync configuration on top (bootstrap/git-sync.yaml).
 
   Deploy in two passes, because AWS requires a person to approve the GitHub
   connection in the console before a repository can be linked:
