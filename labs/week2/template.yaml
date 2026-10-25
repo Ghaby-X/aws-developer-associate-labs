@@ -1,0 +1,588 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Week 2: secure network for the Onward Logistics order system. A two-AZ VPC
+  where an internet-facing load balancer is the only public entry point, web and
+  order servers run in private subnets behind it, a regional NAT gateway gives
+  them outbound-only internet access for updates, and engineers administer every
+  server through Session Manager with no inbound admin ports and no SSH keys.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  OwnerName:
+    Type: String
+    Description: Shown on the front-end page and used as the Owner tag on server volumes.
+  LabName:
+    Type: String
+    Default: Designing a Secure Network for the Onward Logistics Order System
+    Description: Shown on the front-end page.
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: Free Tier eligible in eu-west-1.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Latest Amazon Linux 2023 AMI, resolved at deploy time so every rebuild is patched.
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Network: one public and one private subnet in each of two AZs
+  # ---------------------------------------------------------------------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-orders-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-orders-igw"
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public subnets hold only the internet-facing load balancer. They never give
+  # anything a public IP automatically.
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-public-a"
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.1.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-public-b"
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-private-a"
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.20.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-private-b"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-public-rt"
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  # A regional NAT gateway runs in every AZ that has servers and follows them,
+  # so one gateway gives per-AZ resilience without a NAT in each public subnet.
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      AvailabilityMode: regional
+      ConnectivityType: public
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-orders-nat"
+
+  # Both private subnets share one route table: outbound only, through the NAT.
+  # Nothing routes from the internet into these subnets.
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-private-rt"
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ---------------------------------------------------------------------------
+  # Security groups: each layer accepts traffic only from the layer in front of
+  # it. No group allows SSH or any other admin port.
+  # ---------------------------------------------------------------------------
+  WebAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "onward-${Environment}-web-alb-sg"
+      GroupDescription: Internet-facing load balancer - HTTP from anywhere
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: HTTP from merchants and customers
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-web-alb-sg"
+
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "onward-${Environment}-web-sg"
+      GroupDescription: Web servers - HTTP only from the web load balancer
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: HTTP from the web load balancer
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref WebAlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-web-sg"
+
+  OrdersAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "onward-${Environment}-orders-alb-sg"
+      GroupDescription: Internal order load balancer - port 8080 only from web servers
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: Order API from the web servers
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-orders-alb-sg"
+
+  OrdersSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "onward-${Environment}-orders-sg"
+      GroupDescription: Order servers - port 8080 only from the internal order load balancer
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: Order API from the internal load balancer
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref OrdersAlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "onward-${Environment}-orders-sg"
+
+  # ---------------------------------------------------------------------------
+  # Server identity: Session Manager access only, through an AWS managed policy
+  # ---------------------------------------------------------------------------
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-orders-instance-role"
+      Description: Lets web and order servers register with Systems Manager for Session Manager access.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "onward-${Environment}-orders-instance-profile"
+      Roles:
+        - !Ref InstanceRole
+
+  # ---------------------------------------------------------------------------
+  # Load balancers
+  # ---------------------------------------------------------------------------
+  WebLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: PublicDefaultRoute
+    Properties:
+      Name: !Sub "onward-${Environment}-web-alb"
+      Type: application
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      SecurityGroups:
+        - !Ref WebAlbSecurityGroup
+
+  WebTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "onward-${Environment}-web-tg"
+      VpcId: !Ref Vpc
+      TargetType: instance
+      Protocol: HTTP
+      Port: 80
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        # Drain quickly so a failed server leaves rotation within seconds.
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+
+  WebListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref WebLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebTargetGroup
+
+  # Internal: no public IPs and resolvable only to private addresses, so the
+  # order services are not reachable from the internet whatever the rules say.
+  OrdersLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "onward-${Environment}-orders-alb"
+      Type: application
+      Scheme: internal
+      Subnets:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroups:
+        - !Ref OrdersAlbSecurityGroup
+
+  OrdersTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "onward-${Environment}-orders-tg"
+      VpcId: !Ref Vpc
+      TargetType: instance
+      Protocol: HTTP
+      Port: 8080
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+
+  OrdersListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref OrdersLoadBalancer
+      Protocol: HTTP
+      Port: 8080
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref OrdersTargetGroup
+
+  # ---------------------------------------------------------------------------
+  # Launch templates: no key pair, no public IP, IMDSv2 only, standard CPU
+  # credits so a server never bills above its hourly rate
+  # ---------------------------------------------------------------------------
+  WebLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "onward-${Environment}-web-lt"
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref WebSecurityGroup
+        CreditSpecification:
+          CpuCredits: standard
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: 8
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: !Sub "onward-${Environment}-web" }
+              - { Key: Project, Value: onward }
+              - { Key: Owner, Value: !Ref OwnerName }
+              - { Key: Environment, Value: !Ref Environment }
+          - ResourceType: volume
+            Tags:
+              - { Key: Name, Value: !Sub "onward-${Environment}-web" }
+              - { Key: Project, Value: onward }
+              - { Key: Owner, Value: !Ref OwnerName }
+              - { Key: Environment, Value: !Ref Environment }
+        # Installs the front-end page at boot (the brief's "preinstalled" UI)
+        # and proxies /orders to the internal order load balancer, so the full
+        # path web -> internal ALB -> order server can be shown from a browser.
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            signal() {
+              /opt/aws/bin/cfn-signal -e "$1" --stack ${AWS::StackName} --resource WebAutoScalingGroup --region ${AWS::Region} || true
+            }
+            trap 'signal 1' ERR
+
+            dnf install -y httpd aws-cfn-bootstrap
+
+            TOKEN=$(curl -sf -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+            meta() { curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
+            INSTANCE_ID=$(meta instance-id)
+            AZ=$(meta placement/availability-zone)
+
+            cat > /var/www/html/index.html <<EOF
+            <!doctype html>
+            <html lang="en">
+            <head><meta charset="utf-8"><title>Onward Logistics</title></head>
+            <body style="font-family: sans-serif; max-width: 40rem; margin: 3rem auto;">
+              <h1>${LabName}</h1>
+              <p><strong>Built by:</strong> ${OwnerName}</p>
+              <p>Served by web server <code>$INSTANCE_ID</code> in <code>$AZ</code>.</p>
+              <p><a href="/orders/">Check the internal order service</a></p>
+            </body>
+            </html>
+            EOF
+
+            cat > /etc/httpd/conf.d/orders-proxy.conf <<EOF
+            ProxyPass        /orders/ http://${OrdersLoadBalancer.DNSName}:8080/
+            ProxyPassReverse /orders/ http://${OrdersLoadBalancer.DNSName}:8080/
+            EOF
+
+            systemctl enable --now httpd
+            signal 0
+
+  OrdersLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "onward-${Environment}-orders-lt"
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref OrdersSecurityGroup
+        CreditSpecification:
+          CpuCredits: standard
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: 8
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: !Sub "onward-${Environment}-orders" }
+              - { Key: Project, Value: onward }
+              - { Key: Owner, Value: !Ref OwnerName }
+              - { Key: Environment, Value: !Ref Environment }
+          - ResourceType: volume
+            Tags:
+              - { Key: Name, Value: !Sub "onward-${Environment}-orders" }
+              - { Key: Project, Value: onward }
+              - { Key: Owner, Value: !Ref OwnerName }
+              - { Key: Environment, Value: !Ref Environment }
+        # Placeholder order service on port 8080 that reports which server
+        # answered, so load balancing and failover are visible.
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            signal() {
+              /opt/aws/bin/cfn-signal -e "$1" --stack ${AWS::StackName} --resource OrdersAutoScalingGroup --region ${AWS::Region} || true
+            }
+            trap 'signal 1' ERR
+
+            dnf install -y httpd aws-cfn-bootstrap
+
+            TOKEN=$(curl -sf -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+            meta() { curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
+            INSTANCE_ID=$(meta instance-id)
+            AZ=$(meta placement/availability-zone)
+
+            sed -i 's/^Listen 80$/Listen 8080/' /etc/httpd/conf/httpd.conf
+            cat > /var/www/html/index.html <<EOF
+            <!doctype html>
+            <html lang="en">
+            <head><meta charset="utf-8"><title>Onward order service</title></head>
+            <body style="font-family: sans-serif; max-width: 40rem; margin: 3rem auto;">
+              <h1>Onward order service</h1>
+              <p>Answered by internal order server <code>$INSTANCE_ID</code> in <code>$AZ</code>.</p>
+            </body>
+            </html>
+            EOF
+
+            systemctl enable --now httpd
+            signal 0
+
+  # ---------------------------------------------------------------------------
+  # Auto Scaling groups: one server per AZ in each tier, replaced automatically.
+  # The stack only succeeds once every server has signalled that its software
+  # installed, which needs the NAT route to exist first.
+  # ---------------------------------------------------------------------------
+  OrdersAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - PrivateDefaultRoute
+      - PrivateSubnetARouteTableAssociation
+      - PrivateSubnetBRouteTableAssociation
+    CreationPolicy:
+      ResourceSignal:
+        Count: 2
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        WaitOnResourceSignals: true
+        PauseTime: PT15M
+    Properties:
+      AutoScalingGroupName: !Sub "onward-${Environment}-orders-asg"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref OrdersLaunchTemplate
+        Version: !GetAtt OrdersLaunchTemplate.LatestVersionNumber
+      MinSize: "2"
+      MaxSize: "4"
+      DesiredCapacity: "2"
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      TargetGroupARNs:
+        - !Ref OrdersTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+
+  WebAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - PrivateDefaultRoute
+      - PrivateSubnetARouteTableAssociation
+      - PrivateSubnetBRouteTableAssociation
+    CreationPolicy:
+      ResourceSignal:
+        Count: 2
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        WaitOnResourceSignals: true
+        PauseTime: PT15M
+    Properties:
+      AutoScalingGroupName: !Sub "onward-${Environment}-web-asg"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebLaunchTemplate
+        Version: !GetAtt WebLaunchTemplate.LatestVersionNumber
+      MinSize: "2"
+      MaxSize: "4"
+      DesiredCapacity: "2"
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      TargetGroupARNs:
+        - !Ref WebTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+
+Outputs:
+  WebUrl:
+    Description: The front end, through the internet-facing load balancer.
+    Value: !Sub "http://${WebLoadBalancer.DNSName}"
+  OrdersUrlFromWebTier:
+    Description: The order service through the web tier and the internal load balancer.
+    Value: !Sub "http://${WebLoadBalancer.DNSName}/orders/"
+  OrdersLoadBalancerDns:
+    Description: Internal only. Resolves to private addresses inside the VPC.
+    Value: !GetAtt OrdersLoadBalancer.DNSName
+  VpcId:
+    Value: !Ref Vpc
+  NatGatewayId:
+    Value: !Ref NatGateway
+  WebAutoScalingGroupName:
+    Value: !Ref WebAutoScalingGroup
+  OrdersAutoScalingGroupName:
+    Value: !Ref OrdersAutoScalingGroup

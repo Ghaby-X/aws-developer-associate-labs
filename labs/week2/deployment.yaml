@@ -1,0 +1,11 @@
+template-file-path: labs/week2/template.yaml
+
+parameters:
+  Environment: dev
+  OwnerName: Gabriel Anyaele
+
+# Stack tags propagate to every resource in the stack that supports tagging.
+tags:
+  Project: onward
+  Owner: Gabriel Anyaele
+  Environment: dev
