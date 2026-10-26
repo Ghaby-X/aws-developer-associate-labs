@@ -14,13 +14,13 @@ Hands-on labs from my AWS Certified Developer – Associate preparation programm
 .
 ├── bootstrap/                 # one-time, shared setup used by every lab
 │   ├── github-connection.yaml # CodeConnections link from AWS to this repository
+│   ├── git-sync.yaml          # Git sync role and the sync configuration for the current lab
 │   └── placeholder-stack.yaml # empty stack that reserves a lab's stack name for Git sync
 └── labs/
     └── weekN/
         ├── README.md          # scenario, design decisions, deploy steps, evidence
         ├── template.yaml      # the lab's CloudFormation template
         ├── deployment.yaml    # Git sync stack deployment file (parameters + tags)
-        ├── git-sync.yaml      # the lab's Git sync role and sync configuration
         ├── Discovery Report…  # Stage 1 research and business value (.docx)
         └── evidence/          # test output and screenshots
 ```
@@ -30,8 +30,10 @@ Hands-on labs from my AWS Certified Developer – Associate preparation programm
 Every lab stack is deployed by **CloudFormation Git sync** from this repository's `main` branch.
 
 1. `bootstrap/github-connection.yaml` is deployed once and links the AWS account to this repository.
-2. Each lab's `git-sync.yaml` adds a sync configuration that points at that lab's `deployment.yaml`.
-3. From then on, a merged change to a lab's template or deployment file redeploys only that lab's stack. Sync configurations use `FILE_CHANGE` triggers, so the labs never interfere with each other.
+2. `bootstrap/git-sync.yaml` creates the Git sync role and one sync configuration for the lab being worked on, pointing at that lab's `deployment.yaml`. Switching labs is one redeploy with different `Lab` and `StackPurpose` parameters. The previous lab's stack stays in place, no longer synced, until it is deleted.
+3. From then on, a merged change to the current lab's template or deployment file redeploys its stack. The sync configuration uses a `FILE_CHANGE` trigger, so changes to other labs never redeploy it.
+
+The Git sync role has the AWS managed `PowerUserAccess` policy, which covers every service except IAM and Organizations, plus IAM limited to resources named `onward-<environment>-*`. It works for every lab without changes, as long as lab IAM resources follow the naming standard.
 
 ## Conventions
 
