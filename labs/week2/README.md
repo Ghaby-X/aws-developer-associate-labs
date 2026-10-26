@@ -96,6 +96,8 @@ aws cloudformation describe-stacks --profile onward-logistics \
 
 `WebUrl` shows the front end, and `OrdersUrlFromWebTier` shows an order server's reply, reached through the internal load balancer.
 
+**Parking the servers between sessions.** `ServersPerTier` in `deployment.yaml` sets both Auto Scaling groups. Commit `"0"` to stop all four servers and `"2"` to bring them back, about 5 minutes before the servers serve again. Parking only saves the server and volume cost (about USD 36 a month). The load balancers, NAT gateway and public IPv4 addresses keep billing about USD 0.17 an hour, so delete the stack for longer breaks.
+
 ## Demonstrating the client's checks
 
 Run these live in the review. Set up the shell first:

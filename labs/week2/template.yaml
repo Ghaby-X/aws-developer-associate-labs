@@ -26,6 +26,14 @@ Parameters:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
     Description: Latest Amazon Linux 2023 AMI, resolved at deploy time so every rebuild is patched.
+  ServersPerTier:
+    Type: Number
+    AllowedValues: [0, 2]
+    Default: 2
+    Description: >-
+      Servers in each Auto Scaling group, one per AZ. 2 for high availability;
+      0 parks the servers between lab sessions (the load balancers and NAT
+      gateway keep running and billing).
 
 Resources:
   # ---------------------------------------------------------------------------
@@ -512,7 +520,7 @@ Resources:
       - PrivateSubnetBRouteTableAssociation
     CreationPolicy:
       ResourceSignal:
-        Count: 2
+        Count: !Ref ServersPerTier
         Timeout: PT15M
     UpdatePolicy:
       AutoScalingRollingUpdate:
@@ -525,9 +533,9 @@ Resources:
       LaunchTemplate:
         LaunchTemplateId: !Ref OrdersLaunchTemplate
         Version: !GetAtt OrdersLaunchTemplate.LatestVersionNumber
-      MinSize: "2"
+      MinSize: !Ref ServersPerTier
       MaxSize: "4"
-      DesiredCapacity: "2"
+      DesiredCapacity: !Ref ServersPerTier
       VPCZoneIdentifier:
         - !Ref PrivateSubnetA
         - !Ref PrivateSubnetB
@@ -544,7 +552,7 @@ Resources:
       - PrivateSubnetBRouteTableAssociation
     CreationPolicy:
       ResourceSignal:
-        Count: 2
+        Count: !Ref ServersPerTier
         Timeout: PT15M
     UpdatePolicy:
       AutoScalingRollingUpdate:
@@ -557,9 +565,9 @@ Resources:
       LaunchTemplate:
         LaunchTemplateId: !Ref WebLaunchTemplate
         Version: !GetAtt WebLaunchTemplate.LatestVersionNumber
-      MinSize: "2"
+      MinSize: !Ref ServersPerTier
       MaxSize: "4"
-      DesiredCapacity: "2"
+      DesiredCapacity: !Ref ServersPerTier
       VPCZoneIdentifier:
         - !Ref PrivateSubnetA
         - !Ref PrivateSubnetB

@@ -3,6 +3,8 @@ template-file-path: labs/week2/template.yaml
 parameters:
   Environment: dev
   OwnerName: Gabriel Anyaele
+  # 0 parks the servers between lab sessions; set back to 2 before the review.
+  ServersPerTier: "0"
 
 # Stack tags propagate to every resource in the stack that supports tagging.
 tags:
