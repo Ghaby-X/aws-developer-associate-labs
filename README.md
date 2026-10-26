@@ -7,6 +7,7 @@ Hands-on labs from my AWS Certified Developer – Associate preparation programm
 | Week | Lab | Focus | Status |
 | --- | --- | --- | --- |
 | 1 | [Automating Secure Onboarding at Scale](labs/week1/) | IAM, permissions boundaries, Secrets Manager, CloudTrail, CloudFormation Git sync | In progress |
+| 2 | [Designing a Secure Network for the Order System](labs/week2/) | VPC, multi-AZ subnets, ALB (public and internal), Auto Scaling, regional NAT gateway, Session Manager | In progress |
 
 ## Repository layout
 
